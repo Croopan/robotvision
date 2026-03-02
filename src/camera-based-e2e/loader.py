@@ -13,7 +13,7 @@ from typing import Optional
 import random
 import tqdm
 import open3d as o3d
-from point_cloud import get_waymo_intrinsics, create_point_cloud
+from point_cloud import create_multi_view_point_cloud
 from depthLoss import DepthLoss
 
 devices = ['cuda:0', 'cuda:1']
@@ -115,12 +115,37 @@ class WaymoE2E(IterableDataset):
             
             decoded_images = [self.decode_img(img.image) for img in frame.frame.images]
 
+            # Extract per-camera calibration data for point cloud fusion
+            camera_names = []
+            all_intrinsics = []  # [fx, fy, cx, cy, width, height, k1, k2, p1, p2, k3] per camera
+            all_extrinsics = []  # 4x4 matrix per camera
+            for img_proto in frame.frame.images:
+                cam_name = img_proto.name
+                camera_names.append(cam_name)
+                for c in frame.frame.context.camera_calibrations:
+                    if c.name == cam_name:
+                        all_intrinsics.append([
+                            c.intrinsic[0], c.intrinsic[1],  # fx, fy
+                            c.intrinsic[2], c.intrinsic[3],  # cx, cy
+                            c.width, c.height,
+                            c.intrinsic[4], c.intrinsic[5],  # k1, k2
+                            c.intrinsic[6], c.intrinsic[7],  # p1, p2
+                            c.intrinsic[8],                   # k3
+                        ])
+                        all_extrinsics.append(
+                            np.array(c.extrinsic.transform, dtype=np.float64).reshape(4, 4)
+                        )
+                        break
+
             yield {
                 'PAST': past, 
                 'FUTURE': future, 
                 'IMAGES': decoded_images, 
-                'INTRINSICS': intrinsics_vec, # <--- Passing this to main
-                'NAME': frame.frame.context.name
+                'INTRINSICS': intrinsics_vec,
+                'NAME': frame.frame.context.name,
+                'CAMERA_NAMES': np.array(camera_names, dtype=np.int32),
+                'ALL_INTRINSICS': np.array(all_intrinsics, dtype=np.float64),
+                'ALL_EXTRINSICS': np.array(all_extrinsics, dtype=np.float64),
             }
 
 if __name__ == "__main__":
@@ -131,7 +156,7 @@ if __name__ == "__main__":
     # NOTE: Replace with your path
     DATA_DIR = '/scratch/gilbreth/svelmuru/waymo_end_to_end_dataset/waymo_open_dataset_end_to_end_camera_v_1_0_0/'
     BATCH_SIZE = 32
-    dataset = WaymoE2E(indexFile="index_train.pkl", data_dir = DATA_DIR, images=True, n_items= 2)
+    dataset = WaymoE2E(indexFile="index_train.pkl", data_dir = DATA_DIR, images=True, n_items= 5)
     loader = DataLoader(
         dataset, 
         batch_size=BATCH_SIZE,
@@ -142,59 +167,63 @@ if __name__ == "__main__":
         device = torch.device("cuda")
         depth_model = DepthLoss(device)
         output_dir = "visualizations"
-        
+        os.makedirs(output_dir, exist_ok=True)
+
         for batch_idx, batch_of_frames in enumerate(tqdm(loader)):
-            images = batch_of_frames["IMAGES"][1].to(device)  # Shape: (B, 3, H, W)
-            intrinsics_batch = batch_of_frames["INTRINSICS"]
-            pred_depths = depth_model.get_depth(images)       # Shape: (B, H, W)
+            all_camera_images = batch_of_frames["IMAGES"]  # 5 X (B, 3, H, W)
+            batch_size = all_camera_images[0].shape[0] # B
 
-            batch_size = images.shape[0] # B
-            
             for i in range(batch_size):
-                # Image: (H, W, 3) uint8
+                frame_id = batch_idx * BATCH_SIZE + i
 
-                img_np = images[i].permute(1, 2, 0).cpu().numpy().copy()  
+                # Calibration data 
+                cam_names = batch_of_frames['CAMERA_NAMES'][i]    # (N_cams,)
+                cam_intrinsics = batch_of_frames['ALL_INTRINSICS'][i]  # (N_cams, 6)
+                cam_extrinsics = batch_of_frames['ALL_EXTRINSICS'][i]  # (N_cams, 4, 4)
+                num_cameras = cam_names.shape[0]
 
-                if img_np.max() <= 1.0: 
-                    img_np = (img_np * 255).astype(np.uint8)
-                else: 
-                    img_np = img_np.astype(np.uint8)
-                
-                #save img
-                img_filename = f"batch_{batch_idx:04d}_img_{i:02d}.png"
-                img_path = os.path.join(output_dir, img_filename)
+                rgb_list = []
+                depth_list = []
 
-                img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-                cv2.imwrite(img_path, img_bgr)
+                for cam_idx in range(num_cameras):
+                    cam_enum = cam_names[cam_idx].item()
 
-                # Depth: (H, W) float32
-                depth_np = pred_depths[i].cpu().numpy()
+                    # Get the specific image
+                    img_tensor = all_camera_images[cam_idx][i]  # (3, H, W)
+                    img_gpu = img_tensor.unsqueeze(0).to(device)  # (1, 3, H, W)
 
-                # set camera intrinsics
-                vals = intrinsics_batch[i].numpy()
-                camera_intrinsics = o3d.camera.PinholeCameraIntrinsic()
-                camera_intrinsics.set_intrinsics(
-                    width=int(vals[4]), 
-                    height=int(vals[5]), 
-                    fx=vals[0], fy=vals[1], 
-                    cx=vals[2], cy=vals[3]
+                    # Run depth estimation
+                    pred_depth = depth_model.get_depth(img_gpu)  # (1, H, W)
+                    depth_np = pred_depth[0].cpu().numpy()
+
+                    # Convert image to uint8 numpy
+                    img_np = img_tensor.permute(1, 2, 0).cpu().numpy().copy()
+                    if img_np.max() <= 1.0:
+                        img_np = (img_np * 255).astype(np.uint8)
+                    else:
+                        img_np = img_np.astype(np.uint8)
+
+                    rgb_list.append(img_np)
+                    depth_list.append(depth_np)
+
+                    # Save per-camera image
+                    img_filename = f"frame_{frame_id:04d}_cam_{cam_enum}.png"
+                    img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+                    cv2.imwrite(os.path.join(output_dir, img_filename), img_bgr)
+
+                # Fuse all cameras into one point cloud in vehicle frame
+                fused_pcd = create_multi_view_point_cloud(
+                    rgb_list, depth_list,
+                    cam_intrinsics.numpy(), cam_extrinsics.numpy()
                 )
-                
-                # Create Point Cloud
-                pcd = create_point_cloud(
-                    img_np, 
-                    depth_np, 
-                    intrinsics=camera_intrinsics,
-                    depth_scale=1.0
-                )
 
-                # Save to Disk
-                filename = f"batch_{batch_idx:04d}_img_{i:02d}.pcd"
-                file_path = os.path.join(output_dir, filename)
-                
-                # non-blocking save command
-                o3d.io.write_point_cloud(file_path, pcd)
-                
-    
+                # Save fused point cloud
+                pcd_filename = f"frame_{frame_id:04d}_fused.pcd"
+                o3d.io.write_point_cloud(
+                    os.path.join(output_dir, pcd_filename), fused_pcd
+                )
+                print(f"  Frame {frame_id}: {len(fused_pcd.points)} points "
+                      f"from {num_cameras} cameras")
+
     import cProfile
     main()
