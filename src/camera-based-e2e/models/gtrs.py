@@ -19,6 +19,8 @@ class GTRSConfig:
     n_layers: int = 4
     n_past: int = 16  # 4s @ 4Hz
     vocab_size: int = 16384
+    bev_channels: int = 4      # BEV input channels (max_h, mean_h, density, lum)
+    bev_size: int = 200        # BEV spatial resolution
 
     loss_top_n: int = 64 # in DrivoR/DeepMonocular, N=50, n=5. Here N=1024, n=64
     # 'mse': attempt to regress the error of the trajectory
@@ -29,9 +31,10 @@ class GTRSConfig:
     loss_entropy_lambda: float = 0.01
 
 class GTRSModel(nn.Module):
-    def __init__(self, feature_extractor: nn.Module, *, out_dim: Optional[int]):
+    def __init__(self, feature_extractor: nn.Module, *, out_dim: Optional[int], use_bev: bool = False):
         super().__init__()
         self.cfg = GTRSConfig()
+        self.use_bev = use_bev
         self.features = feature_extractor
         self.d_features = sum(self.features.dims)
         h, w = self.features.data_config["input_size"][1:]
@@ -79,6 +82,22 @@ class GTRSModel(nn.Module):
             nn.Linear(self.cfg.d_ffn, self.cfg.d_model),
         )
 
+        # ── BEV encoder (optional) ──
+        if self.use_bev:
+            # Small CNN: (B, 4, 200, 200) → (B, d_model, 25, 25) → flatten → (B, 625, d_model)
+            self.bev_encoder = nn.Sequential(
+                nn.Conv2d(self.cfg.bev_channels, 32, 3, stride=2, padding=1),   # → 100×100
+                nn.GELU(),
+                nn.Conv2d(32, 64, 3, stride=2, padding=1),                      # → 50×50
+                nn.GELU(),
+                nn.Conv2d(64, self.cfg.d_model, 3, stride=2, padding=1),        # → 25×25
+                nn.GELU(),
+            )
+            self.bev_n_tokens = 25 * 25  # 625 spatial tokens
+            self.bev_pos_encoding = nn.Parameter(
+                nn.init.trunc_normal_(torch.zeros(1, self.bev_n_tokens, self.cfg.d_model), std=0.02)
+            )
+
         # heads
         # for now, just predict the ADE of each trajectory as
         # a proxy for quality, same as DeepMonocularModel.
@@ -122,6 +141,14 @@ class GTRSModel(nn.Module):
         # d_features --> d_model
         visual_tokens = visual_tokens.flatten(start_dim=1, end_dim=2) # (b, n_cameras * n_tokens, d_features)
         tokens: torch.Tensor = self.down_conv(visual_tokens.transpose(1,2)).transpose(1,2) # (b, n_c * n_t, d_model)
+
+        # ── BEV tokens (optional) ──
+        if self.use_bev and 'BEV' in x:
+            bev = x['BEV']  # (B, 4, 200, 200)
+            bev_feat = self.bev_encoder(bev)  # (B, d_model, 25, 25)
+            bev_tokens = bev_feat.flatten(2).transpose(1, 2)  # (B, 625, d_model)
+            bev_tokens = bev_tokens + self.bev_pos_encoding
+            tokens = torch.cat([tokens, bev_tokens], dim=1)  # concat along token dim
 
         # If training, dropout vocab_dropout trajectories from trajectory vocabulary. 
         # GTRS shows this improves generalization

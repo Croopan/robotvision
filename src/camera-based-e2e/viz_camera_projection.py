@@ -19,16 +19,16 @@ Quick-start
 Generate a short clip (50 frames, single driving segment)::
 
     python viz_camera_projection.py \\
-        --data_root /anvil/scratch/x-mgagvani/wod/waymo_end_to_end_camera_v1_0_0/waymo_open_dataset_end_to_end_camera_v_1_0_0 \\
-        --model_path /anvil/scratch/x-mgagvani/wod/waymo_end_to_end_camera_v1_0_0/checkpoints/camera-e2e-epoch=08-val_loss=4.71.ckpt \\
+        --data_root /scratch/gilbreth/svelmuru/waymo_end_to_end_dataset/waymo_open_dataset_end_to_end_camera_v_1_0_0 \\
+        --model_path /scratch/gilbreth/svelmuru/waymo_end_to_end_dataset/checkpoints/camera-e2e-epoch=08-val_loss=4.71.ckpt \\
         --num_samples 50 \\
         --output_dir ./visualizations
 
 Generate a ~5-minute video (multiple segments auto-selected)::
 
     python viz_camera_projection.py \\
-        --data_root /anvil/scratch/x-mgagvani/wod/waymo_end_to_end_camera_v1_0_0/waymo_open_dataset_end_to_end_camera_v_1_0_0 \\
-        --model_path /anvil/scratch/x-mgagvani/wod/waymo_end_to_end_camera_v1_0_0/checkpoints/camera-e2e-epoch=08-val_loss=4.71.ckpt \\
+        --data_root /scratch/gilbreth/svelmuru/waymo_end_to_end_dataset/waymo_open_dataset_end_to_end_camera_v_1_0_0 \\
+        --model_path /scratch/gilbreth/svelmuru/waymo_end_to_end_dataset/checkpoints/camera-e2e-epoch=08-val_loss=4.71.ckpt \\
         --num_samples 1200 \\
         --output_dir ./visualizations
 

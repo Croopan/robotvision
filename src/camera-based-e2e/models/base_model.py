@@ -230,6 +230,8 @@ class LitModel(pl.LightningModule):
 
         # create all input data that we are allowed to give to a model
         model_inputs = {'PAST': past, 'IMAGES': images, 'INTENT': intent}
+        if 'BEV' in batch:
+            model_inputs['BEV'] = batch['BEV']
 
         pred_future = self.forward(model_inputs)  # (B, T*2)
         pred_depth = None

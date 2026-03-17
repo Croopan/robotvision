@@ -11,6 +11,7 @@ import pandas as pd
 
 import torch
 from pathlib import Path
+import os
 
 from loader import WaymoE2E
 
@@ -27,11 +28,14 @@ if __name__ == "__main__":
     parser.add_argument('--max_epochs', type=int, default=10, help='Number of epochs to train')
     parser.add_argument('--compile', action='store_true', help='Whether to compile the model with torch.compile')
     parser.add_argument('--profile', action='store_true', help='Whether to run the profiler')
+    parser.add_argument('--bev_dir', type=str, default=None, help='Path to pre-computed BEV directory (from create_bev.py). If set, enables BEV input to the model.')
     args = parser.parse_args()
 
     # Data 
-    train_dataset = WaymoE2E(indexFile='index_train.pkl', data_dir=args.data_dir, n_items=250_000)
-    test_dataset = WaymoE2E(indexFile='index_val.pkl', data_dir=args.data_dir, n_items=25_000)
+    bev_train = os.path.join(args.bev_dir, 'train') if args.bev_dir else None
+    bev_val = os.path.join(args.bev_dir, 'val') if args.bev_dir else None
+    train_dataset = WaymoE2E(indexFile='index_train.pkl', data_dir=args.data_dir, n_items=250_000, bev_dir=bev_train)
+    test_dataset = WaymoE2E(indexFile='index_val.pkl', data_dir=args.data_dir, n_items=25_000, bev_dir=bev_val)
 
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, num_workers=0, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
     val_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, num_workers=0, collate_fn=collate_with_images, persistent_workers=False, pin_memory=False)
@@ -40,7 +44,7 @@ if __name__ == "__main__":
     in_dim = 16 * 6  # Past: (B, 16, 6)
     out_dim = 20 * 2  # Future: (B, 20, 2)
 
-    model = GTRSModel(feature_extractor=SAMFeatures(model_name="timm/vit_pe_spatial_small_patch16_512.fb", frozen=True), out_dim=out_dim)
+    model = GTRSModel(feature_extractor=SAMFeatures(model_name="timm/vit_pe_spatial_small_patch16_512.fb", frozen=True), out_dim=out_dim, use_bev=args.bev_dir is not None)
     name = str(model.__class__.__name__.replace("Model", "")).lower()
     if args.compile:
         model = torch.compile(model, mode="max-autotune")

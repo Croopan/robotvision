@@ -18,9 +18,11 @@ class WaymoE2E(IterableDataset):
         data_dir='./dataset',
         n_items: Optional[int] = None,
         seed: Optional[int] = None,
+        bev_dir: Optional[str] = None,
     ):
         self.data_dir = data_dir
         self.seed = seed
+        self.bev_dir = bev_dir
 
         self.filename = ""
         self.file = None
@@ -92,12 +94,23 @@ class WaymoE2E(IterableDataset):
                 for img in frame.frame.images
             ]
 
-            yield {'PAST': past, 'FUTURE': future, 'IMAGES_JPEG': jpeg_tensors, 'INTENT': frame.intent, 'NAME': name}
+            sample = {'PAST': past, 'FUTURE': future, 'IMAGES_JPEG': jpeg_tensors, 'INTENT': frame.intent, 'NAME': name}
+
+            # Load pre-computed BEV if available
+            if self.bev_dir is not None:
+                bev_path = os.path.join(self.bev_dir, f'bev_{idx:07d}.npy')
+                if os.path.exists(bev_path):
+                    sample['BEV'] = np.load(bev_path).astype(np.float32)
+                else:
+                    sample['BEV'] = np.zeros((4, 200, 200), dtype=np.float32)
+
+            yield sample
 
 
 def collate_with_images(batch):
     """Collate that keeps IMAGES_JPEG as a list-of-lists (variable-size JPEG
-    bytes cannot be stacked) and delegates everything else to default_collate."""
+    bytes cannot be stacked) and delegates everything else to default_collate.
+    BEV arrays (if present) are regular numpy arrays and collate normally."""
     from torch.utils.data.dataloader import default_collate
     images = [sample.pop('IMAGES_JPEG') for sample in batch]
     collated = default_collate(batch)
@@ -111,7 +124,7 @@ if __name__ == "__main__":
     import time
     from tqdm import tqdm
     # NOTE: Replace with your path
-    DATA_DIR = '/anvil/scratch/x-mgagvani/wod/waymo_end_to_end_camera_v1_0_0/waymo_open_dataset_end_to_end_camera_v_1_0_0'
+    DATA_DIR = '/scratch/gilbreth/svelmuru/waymo_end_to_end_dataset/waymo_open_dataset_end_to_end_camera_v_1_0_0'
     BATCH_SIZE = 256
     dataset = WaymoE2E(indexFile="index_train.pkl", data_dir = DATA_DIR)
     loader = DataLoader(
