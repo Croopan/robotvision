@@ -94,7 +94,14 @@ class WaymoE2E(IterableDataset):
                 for img in frame.frame.images
             ]
 
-            sample = {'PAST': past, 'FUTURE': future, 'IMAGES_JPEG': jpeg_tensors, 'INTENT': frame.intent, 'NAME': name}
+            sample = {
+                'PAST': past, 
+                'FUTURE': future, 
+                'IMAGES_JPEG': jpeg_tensors, 
+                'INTENT': frame.intent, 
+                'NAME': name,
+                'PROTOBUF': np.frombuffer(protobuf, dtype=np.uint8).copy()
+            }
 
             # Load pre-computed BEV if available
             if self.bev_dir is not None:
@@ -113,8 +120,15 @@ def collate_with_images(batch):
     BEV arrays (if present) are regular numpy arrays and collate normally."""
     from torch.utils.data.dataloader import default_collate
     images = [sample.pop('IMAGES_JPEG') for sample in batch]
+    protobufs = [sample.pop('PROTOBUF') for sample in batch] if 'PROTOBUF' in batch[0] else None
+    
     collated = default_collate(batch)
     collated['IMAGES_JPEG'] = images  # list[list[Tensor]], one inner list per sample
+    
+    if protobufs is not None:
+        # We also keep PROTOBUFs as a list of numpy arrays to avoid collating them
+        collated['PROTOBUF'] = protobufs
+        
     return collated
 
 

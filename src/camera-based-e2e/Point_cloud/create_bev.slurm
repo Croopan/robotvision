@@ -16,9 +16,9 @@ module load conda
 # Activate your environment
 conda activate waymo_env
 
-# ── Paths ──
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PARENT_DIR="$(dirname "$SCRIPT_DIR")"
+# ── Paths (hardcoded — BASH_SOURCE doesn't work under Slurm) ──
+SCRIPT_DIR=/home/svelmuru/robotvision/src/camera-based-e2e/Point_cloud
+PARENT_DIR=/home/svelmuru/robotvision/src/camera-based-e2e
 DATA_DIR=/scratch/gilbreth/svelmuru/waymo_end_to_end_dataset/waymo_open_dataset_end_to_end_camera_v_1_0_0
 
 # Parent dir has protos/ and index_*.pkl

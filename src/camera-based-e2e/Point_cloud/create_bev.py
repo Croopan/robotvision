@@ -37,10 +37,12 @@ def load_depth_model(device):
     processor = AutoImageProcessor.from_pretrained(DEPTH_MODEL_ID)
     model = AutoModelForDepthEstimation.from_pretrained(DEPTH_MODEL_ID).to(device)
     model.eval()
-    # FP16 for ~2x faster inference on modern GPUs
+    # FP16 (16 bit floats instead of 32 bit floats) for faster inference on modern GPUs
     if device.type == "cuda":
         model = model.half()
         print("Using FP16 inference")
+        print("Compiling depth model with torch.compile...")
+        model = torch.compile(model, mode="reduce-overhead")
     return model, processor
 
 
@@ -63,13 +65,13 @@ def main():
 
     device = torch.device(args.device)
 
-    # ── Output directory: {data_dir}/../bev/{split}/ ──
+    # Output directory: {data_dir}/../bev/{split}/
     bev_base = Path(args.data_dir).parent / "bev"
     bev_split_dir = bev_base / args.split
     bev_split_dir.mkdir(parents=True, exist_ok=True)
     print(f"BEV output directory: {bev_split_dir}")
 
-    # ── Load index ──
+    # Load index
     index_file = os.path.join(args.index_dir, f"index_{args.split}.pkl")
     print(f"Loading index: {index_file}")
     with open(index_file, "rb") as f:
@@ -82,59 +84,64 @@ def main():
     end_idx = max(end_idx, args.start_idx)  # ensure end >= start
     print(f"Processing frames {args.start_idx} to {end_idx - 1} ({end_idx - args.start_idx} frames)")
 
-    # ── Load depth model ──
+    # Load depth model
     depth_model, depth_processor = load_depth_model(device)
 
-    # ── Process frames ──
-    bev_index = []  # list of (dataset_idx, bev_path)
-    open_file = None
-    open_filename = ""
+    # ── Initialize Asynchronous DataLoader ──
+    # Important: we add parent_dir to sys.path so 'protos' resolves correctly
+    import sys
+    sys.path.append(str(Path(args.data_dir).parent))
+    from loader import WaymoE2E, collate_with_images
+    from torch.utils.data import DataLoader
 
+    dataset = WaymoE2E(indexFile=index_file, data_dir=args.data_dir, n_items=end_idx)
+    
+    # Fast-forward dataset to start_idx if resuming
+    if args.start_idx > 0:
+        dataset.indexes = dataset.indexes[args.start_idx:]
+
+    # num_workers=8 runs file I/O completely in the background
+    num_workers = min(8, os.cpu_count() or 1)
+    loader = DataLoader(
+        dataset,
+        batch_size=1, # process one frame at a time on GPU
+        num_workers=num_workers,
+        collate_fn=collate_with_images,
+        pin_memory=True
+    )
+
+    bev_index = []  # list of (dataset_idx, bev_path)
     viz_dir = Path("./visualizations")
     viz_dir.mkdir(exist_ok=True)
     saved_first_viz = False
 
-    for idx in tqdm(range(args.start_idx, end_idx), desc=f"BEV [{args.split}]"):
-        filename, start_byte, byte_length = indexes[idx]
+    global_idx = args.start_idx
 
-        # Reuse file handle when reading from the same file
-        if open_filename != filename:
-            if open_file is not None:
-                open_file.close()
-            open_file = open(os.path.join(args.data_dir, filename), "rb")
-            open_filename = filename
-
-        open_file.seek(start_byte)
-        protobuf = open_file.read(byte_length)
-
+    for batch in tqdm(loader, desc=f"BEV [{args.split}]", total=end_idx - args.start_idx):
+        protobuf = batch['PROTOBUF'][0].tobytes()
         frame = e2e_pb2.E2EDFrame()
         frame.ParseFromString(protobuf)
 
-        # Skip if already processed (checkpoint/resume support)
-        bev_path = bev_split_dir / f"bev_{idx:07d}.npy"
-        if bev_path.exists():
-            bev_index.append((idx, str(bev_path)))
-            continue
+        bev_path = bev_split_dir / f"bev_{global_idx:07d}.npy"
 
         # Generate BEV
         if args.backend == "gpu":
             bev = create_bev_from_frame_gpu(frame, depth_model, depth_processor, device)
         else:
-            from point_cloud import create_bev_from_frame
-            bev = create_bev_from_frame(frame, depth_model, depth_processor, device)
+            raise NotImplementedError("CPU backend is not supported with the async DataLoader")
+            
         assert bev.shape == (4, BEV_SIZE, BEV_SIZE), f"Unexpected BEV shape: {bev.shape}"
 
         # Save
         np.save(str(bev_path), bev)
-        bev_index.append((idx, str(bev_path)))
+        bev_index.append((global_idx, str(bev_path)))
 
         # Save a visualization of the very first BEV for sanity checking
         if not saved_first_viz:
             _save_bev_visualization(bev, viz_dir / f"bev_sample_{args.split}.png")
             saved_first_viz = True
-
-    if open_file is not None:
-        open_file.close()
+            
+        global_idx += 1
 
     # ── Save index mapping ──
     index_path = bev_base / f"bev_index_{args.split}.pkl"
